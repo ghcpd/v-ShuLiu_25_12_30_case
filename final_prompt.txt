@@ -1,0 +1,197 @@
+1. Role & Objective
+You are an expert Python backend engineer and performance optimization specialist. Your objective is, in a single execution, to design, implement, benchmark, and test an optimized task queue system for image-processing-like tasks, improving performance over a provided baseline script while respecting strict environment and dependency constraints. You must also create automated tests (unit and integration), run them, and ensure the full test report is printed to the terminal.
+
+2. Inputs & Context
+- Baseline script location and role:
+  - A baseline Python script exists at input_new/baseline_task_queue_v2.py. It implements a task queue with known performance issues: coarse-grained locking, unbounded in-memory queue, lack of idempotency and retry, and weak observability.
+- Supporting input files in input_new/:
+  - sample_tasks_small.json: A small JSON task set (5–10 items) for quick functional testing.
+  - generate_tasks.py: A script that can generate large task sets (e.g., 1000 items) for benchmarking; it should be used to create sample_tasks_1000.json at the project root or an appropriate path.
+  - notes.md: Contains known issues and reproduction methods for the baseline (you may use it as context when reasoning about bottlenecks).
+- Project environment:
+  - All work happens in the current project root directory.
+  - The environment must be a local virtual environment (.venv) created inside this project; all commands must assume the virtual environment is activated.
+- Target architecture & concepts to implement:
+  - TaskQueue built on a bounded queue.Queue plus ThreadPoolExecutor.
+  - Processor that simulates processing of tasks (e.g., image transformations) with controllable latency and error probabilities.
+  - Metrics collection for throughput, latency (mean and P95), error rates, retries, and queue depth.
+  - WorkerPool that wires producers, consumers, and graceful shutdown.
+  - Idempotency and deduplication keyed on task fields (e.g., image_key + variant or size).
+  - Retry logic with exponential backoff and jitter, classifying transient vs permanent errors.
+  - Streaming I/O using local files or in-memory buffered streaming.
+
+3. Step-by-Step Instructions
+3.1 Environment Setup
+- Step 1: Ensure all work uses a local virtual environment located at .venv in the project root.
+  - If not already created, create it with: python -m venv .venv
+  - Activate it (platform-specific):
+    - Windows (PowerShell): .venv/Scripts/Activate.ps1
+    - Bash: source .venv/bin/activate
+- Step 2: Upgrade pip and install only the allowed dependencies:
+  - python -m pip install -U pip
+  - pip install pytest requests pillow
+- Step 3: Verify that python -c "import sys; print(sys.executable)" points to the Python interpreter inside .venv.
+
+3.2 Baseline Validation
+- Step 4: Run the baseline script to establish reference performance:
+  - python input_new/baseline_task_queue_v2.py
+- Step 5: Observe and record at least:
+  - Throughput (tasks per second).
+  - Mean and P95 latency.
+  - Error rate.
+  - Any visible resource issues (e.g., CPU spikes, long pauses) as qualitative context.
+
+3.3 Optimized Task Queue Design & Implementation
+- Step 6: Create an optimized implementation file named task_queue_optimized.py at the project root. Implement the following components with clear, modular structure (classes and functions):
+  - TaskQueue:
+    - Wraps a bounded queue.Queue(maxsize=N) where N is configurable (default 100–200).
+    - Uses concurrent.futures.ThreadPoolExecutor as a worker pool; max_workers is configurable (default 4–8).
+    - Provides methods to enqueue tasks, dequeue/process them via worker threads, and report queue depth.
+    - When the queue is at capacity, supports a configurable behavior:
+      - Either block until space is available, or
+      - Fail fast and record a rejection event.
+  - Processor:
+    - Encapsulates the logic for processing a single task (e.g., simulating image processing).
+    - Accepts parameters to inject latency (random delays) and error probabilities.
+    - Distinguishes between transient errors (retryable, e.g., simulated timeouts) and permanent errors (non-retryable, e.g., invalid parameters).
+  - Idempotency and Deduplication:
+    - Define an idempotency key based on task fields (e.g., image_key + variant or size).
+    - Implement an idempotency store using either:
+      - A lightweight SQLite database with a table enforcing a UNIQUE constraint on the idempotency key, or
+      - An in-memory set combined with persistence export (e.g., to JSON) for test verification.
+    - Ensure that if a task with an already-processed idempotency key is received, it is quickly marked as a duplicate without reprocessing.
+  - Retry and Classification Logic:
+    - Implement retries for transient errors only, with an exponential backoff algorithm and random jitter between attempts.
+    - Configure a maximum retry count (e.g., 3 attempts total).
+    - Classify final failures as permanent or exhausted transient retries; send permanently failed tasks to a dead-letter structure (e.g., an in-memory list or file-backed queue) for inspection.
+  - Streaming I/O Simulation:
+    - Simulate object storage using a local directory of files, or use in-memory buffering.
+    - Read and write data in chunks to avoid loading entire file contents into memory at once while claiming streaming.
+  - Metrics and Observability:
+    - Implement a Metrics component with counters and aggregations for:
+      - enqueue_count, dequeue_count, success_count, fail_count, retry_count, rejection_count.
+      - Queue depth (periodic snapshots and/or min/max/average depth).
+      - Task latency per operation, including computation of mean and P95 latency.
+      - Optionally, approximate thread utilization.
+    - Make metrics serializable to JSON for external consumption.
+    - Implement structured logging using the logging module, including fields such as task_id, idempotency_key, error classification, retry count, and latency.
+  - WorkerPool / Orchestration:
+    - Provide a WorkerPool or equivalent orchestration class that wires together:
+      - Task producers (e.g., loading tasks from JSON and enqueueing them).
+      - The TaskQueue and Processor.
+      - Graceful shutdown logic that waits for all in-flight tasks to complete and then exports final metrics and any dead-letter tasks.
+    - Ensure that the queue → process → result chain uses real threads and real work; do not fake concurrency with single-threaded loops or event loops.
+
+3.4 CLI and Benchmarking
+- Step 7: Implement a CLI entry-point in task_queue_optimized.py that allows:
+  - Running the optimized worker system normally (e.g., python task_queue_optimized.py).
+  - Running in benchmark mode via a flag such as --benchmark.
+- Step 8: Create a benchmark script named benchmark.py at the project root that:
+  - Accepts parameters for number of tasks and concurrency level (e.g., 50 or 100 concurrent producers/clients).
+  - Generates or loads a large task set (e.g., using input_new/generate_tasks.py to create sample_tasks_1000.json) if not already present.
+  - Uses the optimized TaskQueue and WorkerPool to process tasks under specified concurrent load.
+  - Measures:
+    - Throughput (tasks/second).
+    - Mean and P95 latencies.
+    - Error rate (fraction of failed tasks, including retries exhausted).
+    - Queue depth statistics.
+  - Prints a clear human-readable summary to the terminal.
+  - Writes metrics and benchmark results to a machine-readable format such as JSON or CSV (e.g., benchmark_results.json) for later comparison.
+
+3.5 Tests and Test Runners
+- Step 9: Create a tests/ directory (if it does not already exist) with at least:
+  - Unit tests (e.g., in tests/test_task_queue.py) that cover:
+    - Idempotency deduplication behavior.
+    - Retry classification between transient and permanent errors.
+    - Metrics correctness under concurrent operations (counts, latency tracking, queue depth updates).
+    - Basic enqueue/dequeue behavior of the bounded queue and interaction with ThreadPoolExecutor.
+  - Integration tests (e.g., in tests/test_integration.py) that:
+    - Run the optimized pipeline on a small task set (e.g., sample_tasks_small.json) and verify tasks complete successfully with correct metrics.
+    - Run under at least two concurrency levels (e.g., 50 and 100) and report metrics.
+    - Optionally compare baseline vs optimized performance metrics, verifying improved throughput and reduced P95 latency when feasible.
+- Step 10: Create simple test runner scripts in the project root:
+  - run_tests.ps1 for Windows PowerShell that activates the virtual environment if necessary and runs pytest -rA.
+  - run_tests.sh for Bash that activates the virtual environment if necessary and runs pytest -rA.
+
+3.6 Documentation and Configuration
+- Step 11: Create a minimal requirements.txt listing only the allowed external packages (pytest, requests, pillow) and any other strictly necessary, lightweight packages within the allowed set.
+- Step 12: Create a .env.example file outlining configurable parameters such as:
+  - MAX_WORKERS
+  - QUEUE_SIZE
+  - RETRY_LIMIT
+  - LATENCY_PROBABILITY / ERROR_PROBABILITY settings for fault injection
+  - Paths for input/output directories
+- Step 13: Create a README file that includes:
+  - Project description and goals.
+  - Environment setup steps (creating and activating .venv, installing dependencies).
+  - How to run the baseline script and what metrics to observe.
+  - How to run the optimized task_queue_optimized.py normally and in benchmark mode.
+  - How to run benchmark.py and interpret its output.
+  - How to run tests (pytest -rA, run_tests.ps1, run_tests.sh) and what a successful test report looks like.
+  - A short section describing key metrics and how to interpret them.
+
+3.7 Performance Validation
+- Step 14: Using benchmark.py or the CLI of task_queue_optimized.py, run benchmarks at 50 and 100 concurrent loads (or other comparable high-concurrency values) and validate that:
+  - Throughput of the optimized implementation is at least approximately 2x the baseline at similar load.
+  - P95 latency for the optimized implementation is at most about 60% of the baseline P95 latency.
+  - CPU usage is stable with no prolonged blocking or memory thrashing.
+- Step 15: Ensure that metrics and benchmark data are stored in JSON (and optionally CSV) files at the project root and/or a dedicated metrics directory for later inspection.
+
+4. Output Specification
+- The final state of the project should include at least the following artifacts:
+  - task_queue_optimized.py implementing the optimized bounded-queue, thread pool, idempotency, retry, streaming I/O, metrics, logging, and worker orchestration.
+  - benchmark.py implementing load generation, concurrent execution, and metrics collection/serialization.
+  - A tests/ directory containing unit and integration tests as described above.
+  - run_tests.ps1 and run_tests.sh scripts that invoke pytest -rA with the virtual environment activated.
+  - requirements.txt capturing the allowed and actually used external dependencies.
+  - .env.example documenting configurable environment variables.
+  - README.md (or README) with clear setup, run, and benchmarking instructions.
+  - Metrics and benchmark result files (e.g., benchmark_results.json, metrics.json) for verification.
+- When executing tests, you must run pytest -rA in the project root and ensure that the full test report (including the "X passed, Y failed" summary) is printed to the terminal.
+- When running the optimized benchmark (via benchmark.py or task_queue_optimized.py --benchmark), you must print the key metrics to the terminal: throughput, mean latency, P95 latency, error rate, and queue depth statistics.
+
+5. Constraints & Preferences
+- Environment and dependency constraints:
+  - Use pure Python; do not introduce heavy frameworks (no Django, no ORMs, no external cloud SDKs).
+  - Prefer standard libraries for concurrency, metrics, and I/O: threading, queue, concurrent.futures, json, logging, sqlite3, time.
+  - Allowed external packages (minimal set): pytest, requests, Pillow (optional), python-dotenv (optional).
+  - Forbidden or not recommended: Celery, Redis, RabbitMQ, Kafka, gevent, eventlet, freezegun, and any distributed message queues.
+  - Enforce strict environment isolation: the entire project (baseline script, optimized implementation, benchmark scripts, and tests) must run inside the same local virtual environment (.venv); do not rely on system Python or global site-packages.
+- Concurrency and correctness constraints:
+  - Must use real multi-threading with ThreadPoolExecutor and queue.Queue(maxsize=...).
+  - Do not fake concurrency with single-threaded event loops or mocking of core paths.
+  - The queue → process → result pipeline must perform real work with proper locking and synchronization.
+- Latency and metrics constraints:
+  - Use time.perf_counter() for latency measurement; do not use time-freezing libraries.
+  - Ensure streaming I/O reads and writes in chunks; do not load entire files in memory while claiming streaming.
+  - Provide metrics that are sufficient for comparing baseline and optimized implementations.
+- Idempotency, persistence, and reliability:
+  - If using a stateful store for idempotency or dead-letter queues, persist state either via SQLite or the file system; do not rely solely on transient in-memory dictionaries.
+  - Ensure idempotency key lookups are efficient.
+- Code style and structure:
+  - Keep the implementation modular, with clear separation between TaskQueue, Processor, Metrics, WorkerPool, and any persistence layers.
+  - Use structured logging rather than ad-hoc prints for operational events.
+
+6. Quality Gates
+- Functional correctness:
+  - All unit and integration tests must pass when running pytest -rA in the project root.
+  - Idempotency behavior must be verified by tests that enqueue duplicate tasks and confirm they are not reprocessed.
+  - Retry behavior must be verified by tests that simulate transient failures and ensure retries occur up to the configured limit.
+- Performance targets:
+  - Under a load of around 100 concurrent clients, the optimized implementation should demonstrate approximately 2x or better throughput relative to the baseline, and P95 latency not exceeding 60% of the baseline P95 latency, as measured by benchmark runs.
+- Observability and metrics:
+  - Metrics JSON output must include at minimum: counts (enqueue, dequeue, success, fail, retry, rejection), latency aggregates (mean, P95), and queue depth insights.
+  - Logs should contain enough structured information to debug failures and performance issues.
+- Self-verification checklist (to be completed programmatically or by inspection):
+  - Verify that no forbidden libraries are imported (e.g., Celery, Redis, Kafka, gevent, eventlet, freezegun).
+  - Verify that queue.Queue(maxsize=...) and ThreadPoolExecutor are used in the core processing pipeline.
+  - Verify that pytest -rA is runnable from the project root and prints a complete test report to the terminal.
+  - Verify that benchmark results and metrics files are generated and contain non-empty, well-formed JSON.
+
+7. Critical Compliance Instructions (Must Be Obeyed)
+- Use a local .venv in the project root and do not depend on system-level Python packages.
+- Use ThreadPoolExecutor combined with a bounded queue.Queue(maxsize=...) for real concurrent task processing; do not fake concurrency.
+- Do not use forbidden libraries such as Celery, Redis, RabbitMQ, Kafka, gevent, eventlet, or freezegun, and do not use external distributed queues.
+- Implement real latency measurement with time.perf_counter(), real streaming I/O (chunked reads/writes), and real idempotency with persistence or exportable state.
+- Create and run automated unit and integration tests using pytest -rA, and ensure the full test report is printed to the terminal.
+- Ensure the final implementation and tests are fully executable in a single turn with no need for further interactive clarification.

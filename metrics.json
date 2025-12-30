@@ -1,0 +1,12 @@
+{
+  "enqueue_count": 50,
+  "dequeue_count": 50,
+  "success_count": 50,
+  "fail_count": 0,
+  "retry_count": 0,
+  "reject_count": 0,
+  "mean_latency": 0.031560224001295864,
+  "p95_latency": 0.04991179995704442,
+  "max_queue_depth": 46,
+  "total_tasks": 50
+}
