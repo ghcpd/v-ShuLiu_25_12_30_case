@@ -1,0 +1,25 @@
+{
+  "summary": {
+    "duration_sec": 2.146616500103846,
+    "total_enqueued": 100,
+    "total_dequeued": 100,
+    "success_count": 100,
+    "fail_count": 0,
+    "retry_count": 0,
+    "reject_count": 0,
+    "success_rate": 1.0,
+    "throughput_per_sec": 46.58493959920756
+  },
+  "latency": {
+    "mean_ms": 581.5450749942102,
+    "p95_ms": 1094.0456000389531,
+    "min_ms": 35.9098999761045,
+    "max_ms": 1130.808399990201
+  },
+  "error_breakdown": {},
+  "config": {
+    "max_workers": 4,
+    "queue_size": 100,
+    "processor_config": {}
+  }
+}
