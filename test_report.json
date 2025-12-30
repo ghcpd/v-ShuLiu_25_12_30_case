@@ -1,0 +1,34 @@
+{
+  "tests": [
+    {
+      "module": "tests.test_idempotency",
+      "name": "test_enqueue_reject_on_full",
+      "status": "PASS"
+    },
+    {
+      "module": "tests.test_idempotency",
+      "name": "test_idempotency",
+      "status": "PASS"
+    },
+    {
+      "module": "tests.test_integration_basic",
+      "name": "test_integration_runs_and_writes",
+      "status": "PASS"
+    },
+    {
+      "module": "tests.test_metrics_and_concurrency",
+      "name": "test_metrics_concurrency",
+      "status": "PASS"
+    },
+    {
+      "module": "tests.test_retry_and_deadletter",
+      "name": "test_retry_and_deadletter",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0
+  }
+}

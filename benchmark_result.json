@@ -1,0 +1,23 @@
+{
+  "wall_time": 0.1744067999534309,
+  "throughput": 28.66860696564051,
+  "metrics": {
+    "counters": {
+      "enqueued": 5,
+      "dequeued": 5,
+      "success": 5,
+      "failed": 0,
+      "retries": 0,
+      "rejected": 0
+    },
+    "latency_mean": 0.08158774003386497,
+    "latency_p95": 0.08330510009545833,
+    "queue_depth_samples": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  }
+}

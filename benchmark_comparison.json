@@ -1,0 +1,23 @@
+{
+  "baseline": {
+    "wall_time": null,
+    "raw": "Traceback (most recent call last):\n  File \"C:\\Users\\v-shuliu1\\test\\1230\\oswe-mini-prime-new\\v-ShuLiu_25_12_30_case\\input_new\\baseline_task_queue_v2.py\", line 53, in <module>\n    load_tasks('sample_tasks_small.json')\n    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\v-shuliu1\\test\\1230\\oswe-mini-prime-new\\v-ShuLiu_25_12_30_case\\input_new\\baseline_task_queue_v2.py\", line 17, in load_tasks\n    with open(path, 'r', encoding='utf-8') as f:\n         ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nFileNotFoundError: [Errno 2] No such file or directory: 'sample_tasks_small.json'\n"
+  },
+  "optimized": {
+    "wall_time": 0.003549800021573901,
+    "throughput": 0.0,
+    "metrics": {
+      "counters": {
+        "enqueued": 0,
+        "dequeued": 0,
+        "success": 0,
+        "failed": 0,
+        "retries": 0,
+        "rejected": 0
+      },
+      "latency_mean": 0.0,
+      "latency_p95": 0.0,
+      "queue_depth_samples": []
+    }
+  }
+}

@@ -1,0 +1,11 @@
+Tests: 5  Passed: 5  Failed: 0
+
+PASS tests.test_idempotency.test_enqueue_reject_on_full
+PASS tests.test_idempotency.test_idempotency
+PASS tests.test_integration_basic.test_integration_runs_and_writes
+PASS tests.test_metrics_and_concurrency.test_metrics_concurrency
+PASS tests.test_retry_and_deadletter.test_retry_and_deadletter
+
+Artifacts:
+  benchmark_result.json
+  benchmark_comparison.json
