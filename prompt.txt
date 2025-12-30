@@ -7,13 +7,15 @@ Mandatory Requirement: You must create automated tests (unit/integration) and co
 - Self-contained and lightweight: Pure Python (no Django/ORM), prioritize standard libraries (threading, queue, concurrent.futures, json, logging, sqlite3).
 - Allowed packages (minimal set): pytest, requests, Pillow (optional), python-dotenv (optional).
 - Forbidden/Not recommended: Celery/Redis/RabbitMQ/Kafka, gevent/eventlet, freezegun, external cloud SDKs, heavy multimedia libraries.
-- Self-test steps:
+- Strict environment isolation: The entire project (baseline script, optimized implementation, benchmark scripts, and tests) must run inside the same local virtual environment (.venv). Do not use the system Python or global site-packages directly.
+- Self-test steps (all commands must be executed with the virtual environment activated):
 	1) Create virtual environment: python -m venv .venv
 	2) Activate (Windows): .venv\Scripts\Activate.ps1 ; (Bash): source .venv/bin/activate
-	3) Install dependencies: python -m pip install -U pip; pip install pytest requests pillow
-	4) Run baseline: python input_new/baseline_task_queue_v2.py (observe original performance)
-	5) Run optimized solution: python task_queue_optimized.py --benchmark (print throughput, mean, P95, error rate)
-	6) Run tests: pytest -rA (terminal prints "X passed, Y failed")
+	3) (Optional) Verify interpreter: python -c "import sys; print(sys.executable)" should point to the .venv inside this project
+	4) Install dependencies: python -m pip install -U pip; pip install pytest requests pillow
+	5) Run baseline: python input_new/baseline_task_queue_v2.py (observe original performance)
+	6) Run optimized solution: python task_queue_optimized.py --benchmark (print throughput, mean, P95, error rate)
+	7) Run tests: pytest -rA (terminal prints "X passed, Y failed")
 
 0.1) Testing Constraints & Prohibited Practices (Prevent "Fake Concurrency/Performance")
 - Must execute real thread concurrency: Use ThreadPoolExecutor + queue.Queue(maxsize=...) ; prohibit single-threaded loops or event loops masquerading as concurrency.
