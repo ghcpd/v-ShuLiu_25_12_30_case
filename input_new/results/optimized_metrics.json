@@ -1,0 +1,26 @@
+{
+  "enqueued": 5,
+  "dequeued": 5,
+  "success": 5,
+  "failed": 0,
+  "retries": 0,
+  "rejected": 0,
+  "mean_latency_sec": 0.012909030914306641,
+  "p95_latency_sec": 0.01317005157470703,
+  "queue_depth_samples": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "queue_depth_max": 0,
+  "queue_maxsize": 200,
+  "queue_current": 0,
+  "elapsed_sec": 0.02225041389465332,
+  "throughput_tps": 224.71492097508707,
+  "total_tasks": 5,
+  "workers": 6,
+  "queue_size": 200,
+  "fault_rate": 0.0
+}
