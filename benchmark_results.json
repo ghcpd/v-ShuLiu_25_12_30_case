@@ -1,0 +1,10 @@
+{
+  "num_tasks": 1000,
+  "concurrency": 50,
+  "throughput": 127.3406847412033,
+  "mean_latency": 0.03085651114818706,
+  "p95_latency": 0.03567139990627766,
+  "error_rate": 0.0,
+  "max_queue_depth": 100,
+  "total_time": 383.61659590003546
+}
