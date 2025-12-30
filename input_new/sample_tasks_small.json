@@ -1,0 +1,7 @@
+[
+  {"image_key": "img/a.jpg", "size": "200x200"},
+  {"image_key": "img/b.jpg", "size": "400x400"},
+  {"image_key": "img/c.jpg", "size": "800x800"},
+  {"image_key": "img/d.jpg", "size": "200x200"},
+  {"image_key": "img/e.jpg", "size": "400x400"}
+]
