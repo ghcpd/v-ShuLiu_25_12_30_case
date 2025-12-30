@@ -1,0 +1,249 @@
+1. **Role & Objective**
+You are a senior Python backend engineer and performance optimization specialist. Your objective is to design and implement an optimized task queue system based on a provided baseline script, using real multithreaded concurrency, a bounded in-memory queue, idempotency and retry handling, and rich metrics/benchmarking. You must also create automated unit and integration tests, run or orchestrate them, and ensure that a clear, human-readable test report is printed to the terminal.
+
+2. **Inputs & Context**
+- You are working in a lightweight, self-contained Python project (no web framework) inside a local virtual environment (e.g., `.venv`).
+- Baseline implementation and inputs (all paths are relative to the project root):
+  - `input_new/baseline_task_queue_v2.py`: Baseline single-file task queue implementation with performance and observability issues.
+  - `input_new/sample_tasks_small.json`: Small task set (5–10 tasks) for quick functional tests.
+  - `input_new/generate_tasks.py`: Script for generating large task sets (e.g., 1000+ tasks) for benchmarking.
+  - `input_new/notes.md`: Notes about known issues and how to reproduce them.
+- Environment and dependency constraints:
+  - Use pure Python (no Django/ORM) and prioritize standard libraries: `threading`, `queue`, `concurrent.futures`, `time`, `json`, `logging`, `sqlite3`, `os`, `pathlib`, `random`.
+  - Allowed external packages (minimal set): `pytest`, `requests`, `Pillow` (optional), `python-dotenv` (optional).
+  - Forbidden or not recommended: Celery/Redis/RabbitMQ/Kafka, gevent/eventlet, freezegun, distributed message queues, heavy multimedia or cloud SDKs.
+  - Everything must run in the same local virtual environment, not using the system Python or global site-packages.
+- Baseline issues to address:
+  - Coarse-grained locking and an unbounded queue causing contention and potential memory thrashing.
+  - No idempotency or deduplication; failures and duplicates are not controlled.
+  - No structured metrics or observability; bottlenecks are hard to diagnose.
+
+3. **Step-by-Step Instructions**
+3.1 Environment & Setup
+- Assume the user will follow these steps to set up the environment; design your code and documentation accordingly:
+  1) Create a virtual environment: `python -m venv .venv`.
+  2) Activate it (Windows PowerShell): `.venv\\Scripts\\Activate.ps1`; (Bash): `source .venv/bin/activate`.
+  3) (Optional) Verify interpreter: `python -c "import sys; print(sys.executable)"` should point inside `.venv` in this project.
+  4) Install dependencies: `python -m pip install -U pip` then `pip install pytest requests pillow python-dotenv` (as needed).
+
+3.2 Architecture Design
+- Design a modular architecture (single file or a few small modules) with clear separation of concerns. At minimum, define:
+  - `TaskQueue` / queue manager:
+    - Wraps a bounded `queue.Queue(maxsize=...)` and a `ThreadPoolExecutor`.
+    - Accepts configuration parameters: `max_workers`, `queue_size`, behavior when the queue is full, retry settings, and paths for persistence.
+  - `Processor` / task processor:
+    - Encapsulates the core logic for processing a single task.
+    - Supports deterministic fault injection (configurable latency and error probability) for testing and benchmarking.
+  - `IdempotencyStore` / deduplication layer:
+    - Tracks processed or in-flight tasks using an idempotency key.
+    - Idempotency key should be composed (for example) from `image_key + variant` or equivalent task attributes.
+    - Implemented via SQLite (preferred) using `UNIQUE` constraints, or an in-memory set with the ability to export full state for verification.
+  - `RetryPolicy` and dead-letter handling:
+    - Distinguishes transient (retryable) vs permanent (non-retryable) errors.
+    - Implements exponential backoff with random jitter and a maximum retry count.
+    - Sends permanently failed tasks to a dead-letter structure (e.g., a list, log, or file) along with metadata.
+  - `Metrics` / observability component:
+    - Tracks key counters and timings: enqueue/dequeue/success/fail/retry/rejected counts, queue depth samples, mean and P95 latency, and optionally approximate thread utilization.
+    - Supports serialization to JSON for automated verification and comparison.
+  - `WorkerPool` / orchestration layer:
+    - Orchestrates producers and consumers.
+    - Provides a clean API to start workers, enqueue tasks, wait for completion, and perform graceful shutdown while exporting final metrics.
+
+3.3 Core Concurrency & Queue Implementation
+- Implement a real multithreaded processing pipeline using `ThreadPoolExecutor` and `queue.Queue(maxsize=...)`:
+  - The queue must be bounded, with a configurable size (e.g., default 100–200 tasks).
+  - Define a clear, configurable policy when the queue is full:
+    - Option A: Block producers until space is available.
+    - Option B: Fail fast and reject tasks; record rejection metrics (`rejected` counter).
+  - Ensure that the queue → worker threads → result path is truly concurrent:
+    - Use worker threads that block on `queue.get()` and submit work to the executor, or use the executor workers directly to consume from the queue.
+    - Avoid any “fake concurrency” such as single-threaded event loops or cooperative multitasking; each queued task should be eligible to run in parallel with others.
+  - Use `time.perf_counter()` to measure per-task latency and overall benchmark durations.
+  - Ensure that worker threads and the executor shut down gracefully and that no tasks are lost in-flight.
+
+3.4 Idempotency & Deduplication
+- Implement idempotency so that repeated tasks with the same idempotency key are not reprocessed:
+  - Compute an idempotency key from the task payload (e.g., `image_key + variant` or equivalent fields).
+  - Use a SQLite database with a table that enforces uniqueness on the idempotency key; or use an in-memory data structure with a persistence/export mechanism.
+  - On receiving a new task:
+    - If the idempotency key has not been seen, record it as in-flight/claimed and proceed to process the task.
+    - If the idempotency key already exists, short-circuit and return the existing result (or mark as duplicate) without re-running the processor logic.
+  - Expose state so tests can confirm that duplicates are not reprocessed.
+
+3.5 Retry Logic, Classification, and Dead-Letter Queue
+- Implement a robust retry strategy:
+  - Define explicit exception types or error codes to distinguish transient vs permanent errors.
+  - For transient errors, retry with exponential backoff and random jitter (e.g., base delay, multiplier, and randomness within a small window).
+  - Enforce a maximum retry count (e.g., 3 attempts); after exhausting retries, treat the task as permanently failed.
+  - For permanent errors (e.g., invalid parameters), fail immediately without retry.
+- Maintain a dead-letter structure (e.g., a list or file) which records:
+  - Task ID / payload, idempotency key, error type (transient/permanent), final error message, and number of attempts.
+- Export dead-letter data in a form that can be inspected and verified in tests.
+
+3.6 Streaming I/O (Local Storage)
+- Simulate object storage using the local filesystem:
+  - For input and output objects, read and write data in chunks to avoid loading entire large files into memory at once.
+  - Ensure created directories exist (`os.makedirs(..., exist_ok=True)`) before writing.
+- Provide an abstraction that:
+  - Given a logical key (e.g., an object path or filename), can open a file-like stream for reading or writing.
+  - Can be exercised in tests without external services.
+
+3.7 Metrics, Logging, and Observability
+- Implement a metrics component that tracks at least:
+  - `enqueued`, `dequeued`, `success`, `failed`, `retries`, `rejected` (queue full), and optionally `dead_lettered`.
+  - Queue depth over time (sampled on enqueue/dequeue).
+  - Per-task latency measurements from start to completion, enabling calculation of mean and P95 latency.
+- Provide functions to compute summary statistics:
+  - Throughput (tasks per second) for a given run.
+  - Mean and P95 latency.
+  - Aggregate error and retry rates.
+- Implement structured logging (using the `logging` module) that includes:
+  - Task ID, idempotency key, classification of errors (transient/permanent), number of attempts, and timing information.
+- Expose a method (e.g., `to_dict()` or `to_json()`) to export metrics to JSON for automated verification and benchmark comparison.
+
+3.8 CLI Entrypoint & Optimized Runner
+- Implement an optimized runner script (e.g., `task_queue_optimized.py`) that provides a CLI interface:
+  - Accepts command-line arguments or environment variables to configure:
+    - Number of worker threads (`max_workers`).
+    - Queue size (`queue_size`).
+    - Retry limits and backoff parameters.
+    - Paths to input task JSON files and output directories.
+    - Optional SQLite database path for idempotency.
+  - Supports at least the following modes:
+    - A demo or functional mode to run a small task set (e.g., from `sample_tasks_small.json`) and print basic metrics.
+    - A benchmark mode (e.g., `--benchmark`) that runs a more intensive workload and writes detailed metrics to a JSON file.
+- Ensure that running the optimized script directly (e.g., `python task_queue_optimized.py --benchmark`) prints a concise summary of throughput, mean latency, P95 latency, error rate, and queue depth statistics to the terminal.
+
+3.9 Benchmark Script
+- Implement a separate benchmark script (e.g., `benchmark.py`) that can:
+  - Run the baseline script (`input_new/baseline_task_queue_v2.py`) and capture its performance metrics.
+  - Run the optimized script (`task_queue_optimized.py`) under comparable conditions (e.g., same input task set, similar concurrency/load parameters).
+  - Support different load levels (e.g., 50 and 100 concurrent producers or equivalent load) using threads or a simple load generator.
+- For each run, measure and record:
+  - Total wall-clock time (`time.perf_counter()`).
+  - Throughput (tasks per second).
+  - Mean and P95 latency.
+  - Error rate and retry counts.
+  - Queue depth behavior (e.g., max depth observed).
+- Export benchmark results:
+  - Write `benchmark_result.json` for the latest optimized run.
+  - Optionally write a comparison file (e.g., `benchmark_comparison.json`) with baseline vs optimized metrics.
+- Print a concise benchmark summary to the terminal, including at least throughput and P95 latency for baseline and optimized implementations.
+
+3.10 Automated Tests (Unit & Integration)
+- Use `pytest` as the primary test framework (while keeping tests simple and deterministic). Under `tests/`, create at least the following:
+  - `test_idempotency.py`:
+    - Verifies that tasks with duplicate idempotency keys are not reprocessed.
+    - Ensures that idempotency state persists correctly via SQLite or exported state.
+    - Optionally verifies queue-full behavior and rejection metrics.
+  - `test_retry_and_deadletter.py`:
+    - Verifies correct classification of transient vs permanent errors.
+    - Checks that transient errors are retried with an upper bound on attempts.
+    - Confirms that permanently failed tasks are recorded in a dead-letter structure with accurate metadata.
+  - `test_metrics_and_concurrency.py`:
+    - Verifies that metrics counters (enqueued, success, failed, retries, rejected) are consistent with the number of tasks and simulated failures.
+    - Checks that mean and P95 latency values are computed and fall within reasonable bounds for the test scenario.
+    - Confirms that multiple tasks actually run concurrently (e.g., by comparing elapsed time vs per-task sleep durations).
+  - `test_integration_basic.py`:
+    - Runs the optimized queue end-to-end on a small task set.
+    - Verifies that output files or results are produced.
+    - Asserts that metrics and idempotency behave correctly.
+- Ensure that tests are deterministic and do not rely on network or external services; use temporary directories and in-memory or temporary SQLite databases.
+- Make sure that the entire queue → process → result chain is exercised by tests without mocking the core execution path (mock only external or slow dependencies if needed).
+
+3.11 Test Runner & Terminal Reporting
+- In addition to standard `pytest` usage, provide a simple test runner script (e.g., `run_tests_and_report.py`) that:
+  - Executes the full test suite (e.g., by invoking `pytest` programmatically or by importing and running `test_*` functions directly if `pytest` is unavailable).
+  - Captures test results and writes them to machine-readable files (e.g., `test_report.json`) and a concise text report (e.g., `test_report.txt`).
+  - **Critically, prints a clear, human-readable summary to stdout/terminal**, including at least:
+    - Total number of tests run.
+    - Number of tests passed and failed.
+    - Exit status or a short success/failure message.
+- Ensure that when the user runs a single command (such as `python run_tests_and_report.py` or `pytest -rA`), they will see the test results in the terminal without needing to open any files.
+
+3.12 Project Scripts & Documentation
+- Provide minimal but complete project scaffolding:
+  - `requirements.txt` listing only the necessary dependencies (including `pytest` and any optional libraries you actually use).
+  - `run_tests.ps1` and/or `run_tests.sh` scripts to:
+    - Activate (or assume) the virtual environment.
+    - Run the test suite.
+    - Optionally call `run_tests_and_report.py` and/or `benchmark.py`.
+  - `README.md` that includes:
+    - Installation steps and virtual environment setup.
+    - How to run the baseline script.
+    - How to run the optimized script (demo and benchmark modes).
+    - How to run the tests and where to see the test report.
+    - How to run the benchmark script and interpret benchmark outputs.
+  - Optionally, a `.env.example` file showing configuration knobs (e.g., worker counts, queue size, database path, input file paths).
+
+4. **Output Specification**
+- Code files:
+  - `task_queue_optimized.py` (and/or a small set of modules) implementing:
+    - Bounded queue + `ThreadPoolExecutor`.
+    - Idempotency and deduplication.
+    - Retry logic and dead-letter queue.
+    - Streaming I/O abstractions.
+    - Metrics collection and export.
+    - CLI entrypoint with demo and benchmark modes.
+  - `benchmark.py` implementing baseline vs optimized comparison and writing JSON benchmark outputs.
+- Test suite:
+  - `tests/test_idempotency.py`.
+  - `tests/test_retry_and_deadletter.py`.
+  - `tests/test_metrics_and_concurrency.py`.
+  - `tests/test_integration_basic.py`.
+- Test runner and scripts:
+  - `run_tests_and_report.py` that runs tests and:
+    - Writes `test_report.json` and `test_report.txt`.
+    - Prints a concise summary of test results to the terminal.
+  - Optional: `run_tests.ps1` and `run_tests.sh` wrappers to simplify invoking the test suite.
+- Benchmark outputs:
+  - `benchmark_result.json`: JSON object containing aggregate metrics for an optimized run (throughput, mean and P95 latency, error rate, retry counts, queue depth statistics, etc.).
+  - Optional `benchmark_comparison.json`: JSON object or list summarizing both baseline and optimized metrics.
+- Documentation and configuration:
+  - `requirements.txt` with the minimal allowed dependencies.
+  - `README.md` with clear instructions.
+  - Optional `.env.example` with environment variable names and example values.
+- Terminal behavior:
+  - Running `python task_queue_optimized.py --benchmark` must print a concise metrics summary to stdout.
+  - Running the main test command (e.g., `python run_tests_and_report.py` or `pytest -rA`) must result in test results being visible in the terminal.
+
+5. **Constraints & Preferences**
+- Concurrency and performance:
+  - Use real OS-level threads via `ThreadPoolExecutor` and `queue.Queue`; do not implement fake or cooperative concurrency.
+  - Do not use gevent/eventlet or monkey-patching frameworks.
+  - Use `time.perf_counter()` for all performance and latency measurements; do not freeze or fake time.
+- I/O and persistence:
+  - Only use local filesystem and SQLite for persistence; do not use external databases, caches, or message queues.
+  - Implement streaming I/O via chunked reads/writes; do not claim streaming while loading entire files into memory.
+- Testing and idempotency:
+  - Do not mock the core queue → process → result chain; only mock external or slow components if absolutely necessary.
+  - Ensure idempotency and persistence are testable; allow tests to reset or isolate state (e.g., by using temporary SQLite databases).
+- Performance targets (for guidance):
+  - Aim for approximately 2x throughput improvement over the baseline at around 100 concurrent load.
+  - Aim for P95 latency ≤ 60% of baseline under comparable conditions.
+  - Avoid prolonged blocking and memory thrashing; design to keep CPU usage stable.
+- Dependencies and environment:
+  - Respect the allowed/forbidden dependency list; keep the project lightweight and self-contained.
+  - Assume all code and tests will be run inside a single `.venv` specific to this project.
+
+6. **Quality Gates**
+- Functional correctness:
+  - All unit and integration tests must pass when run via the provided test commands.
+  - Idempotency must prevent duplicate processing of tasks sharing the same idempotency key.
+  - Retry behavior and dead-letter recording must match the specified semantics.
+- Concurrency and metrics:
+  - Verify that multiple tasks execute concurrently by constructing tests where serial execution would take significantly longer than the observed runtime.
+  - Confirm that metrics counters and latency statistics match known small test scenarios.
+- Benchmark validation:
+  - When comparing baseline and optimized implementations, confirm that:
+    - Optimized throughput is >= baseline throughput (ideally ~2x or more under 100 concurrent load).
+    - Optimized P95 latency is <= 60% of the baseline P95 latency (where reasonably achievable).
+- Terminal reporting:
+  - Confirm that running the documented test command prints a clear summary of test results to the terminal (including the number of tests that passed/failed).
+  - Confirm that running the benchmark mode prints a concise performance summary to the terminal.
+
+**Critical compliance instructions (must not be violated):**
+- Do not use forbidden packages (Celery/Redis/RabbitMQ/Kafka, gevent/eventlet, freezegun, or any distributed message queue).
+- Ensure all concurrency is implemented with real threads and a bounded `queue.Queue`.
+- Ensure all performance measurements use real elapsed time via `time.perf_counter()` without time-freezing.
+- Ensure that at least one provided command runs the full automated test suite and prints a clear, human-readable summary of test results to the terminal in a single run, without requiring any interactive follow-up or additional prompts.
