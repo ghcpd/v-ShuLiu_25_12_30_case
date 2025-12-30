@@ -1,0 +1,279 @@
+User: Category: Performance Optimization (Medium Difficulty)
+Scenario: Task Queue Optimization with Thread Pool and Bounded Queue
+
+Mandatory Requirement: You must create automated tests (unit/integration) and complete model testing; print test results to the terminal.
+
+0) Environment & Dependencies (Lightweight & Self-Contained)
+- Self-contained and lightweight: Pure Python (no Django/ORM), prioritize standard libraries (threading, queue, concurrent.futures, json, logging, sqlite3).
+- Allowed packages (minimal set): pytest, requests, Pillow (optional), python-dotenv (optional).
+- Forbidden/Not recommended: Celery/Redis/RabbitMQ/Kafka, gevent/eventlet, freezegun, external cloud SDKs, heavy multimedia libraries.
+- Strict environment isolation: The entire project (baseline script, optimized implementation, benchmark scripts, and tests) must run inside the same local virtual environment (.venv). Do not use the system Python or global site-packages directly.
+- Self-test steps (all commands must be executed with the virtual environment activated):
+
+	1) Create virtual environment: python -m venv .venv
+	2) Activate (Windows): .venv\Scripts\Activate.ps1 ; (Bash): source .venv/bin/activate
+	3) (Optional) Verify interpreter: python -c "import sys; print(sys.executable)" should point to the .venv inside this project
+	4) Install dependencies: python -m pip install -U pip; pip install pytest requests pillow
+	5) Run baseline: python input_new/baseline_task_queue_v2.py (observe original performance)
+	6) Run optimized solution: python task_queue_optimized.py --benchmark (print throughput, mean, P95, error rate)
+	7) Run tests: pytest -rA (terminal prints "X passed, Y failed")
+
+0.1) Testing Constraints & Prohibited Practices (Prevent "Fake Concurrency/Performance")
+- Must execute real thread concurrency: Use ThreadPoolExecutor + queue.Queue(maxsize=...) ; prohibit single-threaded loops or event loops masquerading as concurrency.
+- Real latency measurement: Use time.perf_counter() to record actual elapsed time; prohibit time freezing (e.g., freezegun) to fake data.
+- Streaming I/O: Read/write local files by chunks; prohibit reading entire content into memory then claiming streaming.
+- Idempotency & persistence: If state machine is involved, must persist with SQLite or file system; prohibit pure in-memory dict.
+- Queue backpressure observable: Record and export queue depth, enqueue/dequeue rates, retry and failure counts.
+- Prohibit mocking core paths: Only use mocking for external dependencies or fault injection; queue → process → result chain must be real.
+- Forbidden packages: gevent/eventlet (monkey-patch), freezegun, Celery/Redis/RabbitMQ/Kafka, distributed message queues.
+
+I. Background & Goals
+Baseline is a single-file Python script (input_new/baseline_task_queue_v2.py) using global locks and unbounded queue with performance bottlenecks:
+- Coarse-grained locking causes queue contention, lowering throughput
+- Unbounded in-memory queue causes memory thrashing
+- Lacks idempotency and retry; failure rate uncontrollable
+- Lacks metrics and observability; difficult to locate bottlenecks
+Goal: On pure Python (single file or lightweight modules), achieve ~2x throughput improvement and P95 latency ≤60% baseline via ThreadPoolExecutor + bounded queue, idempotency keys, retry strategy, and metrics export under 100 concurrent loads.
+
+II. Scope & Non-Goals
+In scope: Thread pool and bounded queue implementation, idempotency keys and deduplication, retry and classification, streaming I/O (local files or memory buffering), metrics and benchmark scripts.
+Out of scope: REST API, database ORM, complex auth, UI, cross-datacenter replication, GPU processing, external service integration.
+
+III. Architecture & Implementation Requirements
+1) Modular structure (single file or multiple modules, recommend separation of concerns):
+	- TaskQueue: Bounded queue.Queue + ThreadPoolExecutor container; configurable parameters (max_workers, queue_size)
+	- Processor: Core logic for processing a single task; support fault injection (latency, error probability)
+	- Metrics: Counters (enqueue/dequeue/success/fail/retry), latency mean/P95, queue depth; serializable to JSON
+	- WorkerPool: Manage producer and consumer ends; support graceful shutdown and final metrics export
+
+2) ThreadPoolExecutor + queue.Queue(maxsize=N) implementation:
+	- Bounded queue size configurable (default 100–200)
+	- When capacity exceeded, producer either blocks or fails fast (configurable); record rejection events
+	- Support configurable max_workers (default 4–8)
+
+3) Idempotency & deduplication:
+	- Idempotency key = image_key + variant; use SQLite UNIQUE constraint or in-memory set to track processed keys
+	- Duplicate tasks return quickly without reprocessing
+
+4) Retry & classification:
+	- Distinguish transient errors (retryable, e.g., timeout) from permanent errors (non-retryable, e.g., bad parameter)
+	- Exponential backoff + random jitter; retry limit (e.g., 3 attempts); failed tasks go to dead-letter queue
+
+5) Streaming I/O (local):
+	- Simulate MinIO object storage using local directory + chunked read/write
+	- Or support in-memory buffered streaming (avoid reading entire object at once into memory)
+
+6) Metrics & observability:
+	- Core metrics: enqueue/dequeue/success/fail/retry counts, queue depth, mean & P95 latency, thread utilization
+	- Structured logging (includes task_id, idempotency_key, error classification)
+	- Metrics export (JSON format) for verification and comparison
+
+IV. Data Structures & State
+- Task record or in-memory structure: id, idempotency_key, status (queued/running/success/failed), retries, created_at, output_key, version
+- Optional persistence: SQLite table or JSON file; if in-memory only, must support persistence export for test verification
+- Idempotency key indexing: Ensure fast deduplication query
+
+V. Performance Targets & Validation
+- Throughput: ≥2x baseline at 100 concurrent clients
+- Latency: P95 ≤ 60% of baseline
+- Resources: CPU stable, no prolonged blocking or memory thrashing
+- Benchmark script: benchmark.py runs 50/100 concurrent load; prints throughput, mean/P95 latency, error rate, queue depth stats; results written to JSON/CSV
+
+VI. Testing Strategy
+- Unit tests: Idempotency deduplication, retry classification, concurrent counting correctness
+- Integration tests: Run at 50/100 concurrency; compare baseline vs optimized metrics (throughput, P95, error rate)
+- Fault injection: Random delays, error probability, queue overflow
+- Baseline validation: First run original baseline_task_queue_v2.py to record performance; then run optimized version for comparison
+
+VII. Deliverables
+- Code: task_queue_optimized.py (or multiple modules), clear comments and module boundaries
+- Configuration: requirements.txt (minimal packages only), .env example (configuration parameters)
+- Scripts: benchmark.py (load and metrics collection), run_tests.ps1/run_tests.sh (automated testing)
+- Documentation: README (installation, running, result comparison)
+- Report: Performance comparison data (JSON/CSV), metric definitions
+- Tests: tests/ directory with unit/integration tests, runnable via pytest
+
+VIII. Input Files (located in input_new/)
+- baseline_task_queue_v2.py: Original baseline with performance issues
+- sample_tasks_small.json: Small task set (5–10 items) for quick testing
+- generate_tasks.py: Generate large task sets (e.g., 1000 items) for benchmarking
+- notes.md: Known issues and reproduction method
+
+IX. Implementation Guidance
+- Step 1: Reproduce baseline performance (run baseline_task_queue_v2.py, record throughput/P95)
+- Step 2: Implement bounded queue + ThreadPoolExecutor; remeasure
+- Step 3: Add idempotency deduplication + retry logic; observe failure rate and retry rates
+- Step 4: Add metrics collection and export; generate comparison report
+- Step 5: Unit/integration test coverage of core branches; ensure reproducibility
+
+GitHub Copilot: I'll read the baseline script and then add the optimized implementation plus tests and supporting files. I'll open the baseline to match its inputs and behavior.
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/input_new/baseline_task_queue_v2.py)
+
+Creating the optimized implementation, benchmark wrapper, config and README (first batch of files).
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/task_queue_optimized.py)
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/benchmark.py)
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/requirements.txt)
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/README.md)
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/.env.example)
+
+Now I'll add unit and integration tests plus a PowerShell helper to run them.
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/run_tests.ps1)
+
+Creating test files (unit + integration).
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/tests/test_queue_unit.py)
+
+Adding integration tests that run the baseline and optimized implementations and compare metrics.
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/tests/test_integration.py)
+
+Running the test suite (pytest) now — I'll print results to the terminal.
+
+Ran terminal command: python -m pytest -rA
+
+I'll run the optimized benchmark standalone to inspect the output and metrics.
+
+Ran terminal command: python task_queue_optimized.py --benchmark --total 100 --workers 8 --queue-size 100
+
+I'll update `TaskQueue` to track pending idempotency keys (prevent duplicate enqueues) and remove keys after processing; then re-run tests.
+
+Using "Replace String in File"
+
+
+```
+
+```
+
+
+Using "Replace String in File"
+
+
+```
+
+```
+
+
+Using "Replace String in File"
+
+
+```
+
+```
+Re-running the optimized benchmark to verify deduplication prevents duplicate enqueues and that success count matches unique tasks processed.
+
+Ran terminal command: python task_queue_optimized.py --benchmark --total 100 --workers 8 --queue-size 100
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/oswe-mini-m23a2s165/v-ShuLiu_25_12_30_case/input_new/sample_tasks_small.json)
+
+I'll update test_integration.py to (1) assert deduplication for duplicate-heavy workload, and (2) add a unique-workload comparison by temporarily replacing sample_tasks_small.json with 100 unique tasks, running baseline and optimized, then restoring the original file.
+
+Using "Replace String in File"
+
+
+```
+
+```
+Re-running the test suite after fixes.
+
+Ran terminal command: python -m pytest -q -rA
+
+## ✅ Status update
+I inspected the baseline, implemented an optimized task queue (ThreadPoolExecutor + bounded queue), added idempotency + retry + metrics, and created unit + integration tests — then ran the full test suite. All tests are passing.
+
+---
+
+## What I changed / added 🔧
+Files added to the workspace:
+- task_queue_optimized.py — optimized implementation (bounded queue, ThreadPoolExecutor, idempotency via SQLite, retry/backoff, metrics, streaming I/O simulation)
+- benchmark.py — quick runner for larger benchmarks
+- requirements.txt — minimal test/dev deps
+- README.md / .env.example / run_tests.ps1
+- tests:
+  - test_queue_unit.py (unit tests)
+  - test_integration.py (integration tests comparing baseline vs optimized)
+- metrics_optimized.json is written by the benchmark when executed
+
+Key functionality:
+- Bounded `queue.Queue(maxsize=...)` + `ThreadPoolExecutor`
+- Producer behavior: configurable block-or-fail on full queue
+- Idempotency:
+  - Persistent SQLite store (UNIQUE constraint)
+  - In-memory pending-key set to prevent duplicate enqueues while a task is queued/processing
+- Retry logic with exponential backoff + jitter, retry-limit, dead-letter queue
+- Streaming I/O simulation (chunked writes)
+- Metrics: enqueue/dequeue/success/fail/retry/reject counts, mean & P95 latency, queue depth; JSON export
+- Fault-injection support in `Processor` for testing retries/failures
+- Automated tests (unit + integration) — run with `pytest -rA`
+
+---
+
+## How to run (quick) ⚡
+1. Create venv and install:
+   - Windows PowerShell:
+     - python -m venv .venv
+     - .venv\Scripts\Activate.ps1
+     - python -m pip install -U pip
+     - pip install -r requirements.txt
+2. Run baseline (from the input_new folder):
+   - python baseline_task_queue_v2.py
+3. Run optimized benchmark:
+   - python task_queue_optimized.py --benchmark
+   - (or) python benchmark.py
+   - Output: JSON metrics printed and saved to metrics_optimized.json
+4. Run tests:
+   - pytest -rA
+   - (or) run_tests.ps1
+
+---
+
+## Notable design points & constraints 🧭
+- ThreadPoolExecutor is used for real concurrency; timings use time.perf_counter().
+- Idempotency persisted in SQLite (thread-safe connection with locking).
+- Prevents duplicate work in-flight via an in-memory pending set + persistent store for completed tasks.
+- Retry classification uses explicit exceptions:
+  - TransientError → retryable (exponential backoff + jitter)
+  - PermanentError → no retry, goes to dead-letter
+- Streaming I/O simulated with chunked writes (no large memory buffers).
+- Metrics are serializable to JSON for automated verification.
+
+---
+
+## Tests & verification ✅
+- Unit tests validate idempotency, retry behavior, metrics collection.
+- Integration tests:
+  - Duplicate-heavy scenario — verifies deduplication (unique tasks processed only once).
+  - Unique-task scenario — compares optimized throughput against baseline (temporary test data used).
+- All tests pass in this workspace:
+  - Result: 5 passed, 0 failed (pytest -rA)
+
+---
+
+## Files you may want to open 🔎
+- task_queue_optimized.py — main implementation
+- test_integration.py — shows how baseline ↔ optimized comparison is performed
+- README.md — quick usage/installation
+
+---
+
+## Next steps / optional improvements 💡
+1. Export more detailed runtime metrics (per-thread utilization, queue depth time-series).
+2. Add CSV output for the benchmark (for easier plotting).
+3. Add CI workflow to run tests and benchmarks automatically.
+
+---
+
+If you'd like, I can:
+- Run a larger benchmark now (50/100/500 tasks) and save comparison JSON/CSV.
+- Add a small HTML report summarizing baseline vs optimized metrics.
+- Add more unit tests (edge cases, fault-injection scenarios).
+
+Which of the above should I do next?
+
+Made changes.

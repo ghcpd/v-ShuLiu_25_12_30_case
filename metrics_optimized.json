@@ -1,0 +1,17 @@
+{
+  "enqueued": 100,
+  "dequeued": 100,
+  "success": 100,
+  "failed": 0,
+  "retries": 0,
+  "rejected": 0,
+  "mean_latency_ms": 31.526005010819063,
+  "p95_latency_ms": 44.60820008534938,
+  "samples": 100,
+  "duration_s": 0.42703140003141016,
+  "throughput_qps": 234.1748171039519,
+  "dead_letter": 0,
+  "queue_size": 100,
+  "workers": 8,
+  "total_tasks": 100
+}
