@@ -1,0 +1,248 @@
+Role & Objective
+You are a senior Python backend engineer and prompt engineer. Your objective is, in a single run, to implement and validate an optimized task queue system in this existing repository so that all provided pytest tests pass and the optimized implementation achieves the required performance, observability, and reliability characteristics compared to the baseline script.
+
+Inputs & Context
+  - input_new/baseline_task_queue_v2.py: Original baseline with performance issues.
+  - input_new/sample_tasks_small.json: Small task set (5–10 items) for quick testing.
+  - input_new/generate_tasks.py: Generates large task sets (e.g., 1000 items) for benchmarking.
+  - input_new/notes.md: Known issues and reproduction notes.
+  - benchmark.py: Load generator and metrics comparison between baseline and optimized implementations.
+  - run_tests.py / run_tests.ps1 / run_tests.sh: Convenience scripts for running the tests.
+  - Pure Python project, no frameworks like Django or ORMs.
+  - Virtual environment is local to the repository and already activated when commands are run.
+  - You may rely on standard library modules plus pytest, requests, Pillow, and python-dotenv.
+
+Step-by-Step Instructions
+1. Environment Setup
+  - Create venv: python -m venv .venv
+  - Activate (Windows): .venv\Scripts\Activate.ps1
+  - Activate (Bash): source .venv/bin/activate
+  - Verify interpreter (optional): python -c "import sys; print(sys.executable)" (must point into .venv under this project).
+  - Upgrade pip and install dependencies: python -m pip install -U pip && pip install pytest requests pillow python-dotenv
+
+2. Baseline Reproduction & Understanding
+  - Uses global locks and an unbounded in-memory queue.
+  - Suffers from queue contention, potentially low throughput, and no backpressure.
+  - Has no strong idempotency or deduplication guarantees.
+  - Has limited metrics and observability.
+
+3. Core Architecture Design
+  1) TaskQueue / BoundedTaskQueue
+     - Wrapper around queue.Queue(maxsize=N) and a ThreadPoolExecutor.
+     - Configurable parameters:
+       - max_workers (default 4–8, configurable).
+       - queue_size (default 100–200, configurable).
+     - Behavior:
+       - Enqueue operations respect the bounded queue. When the queue is at capacity, behavior must be configurable:
+         - Either block until space is available; or
+         - Fail fast (raising an appropriate exception or returning a rejection), and increment the “rejection” metric.
+       - Provide operations to enqueue tasks, dequeue tasks for workers, and inspect current size (qsize).
+       - Ensure correctness for concurrent enqueue/dequeue operations.
+
+  2) Processor / TaskProcessor
+     - Core logic to process a single task (e.g., image processing or generic task simulation).
+     - Input: a task record dict containing fields such as id, image_key, variant/size, and any fault-injection configuration.
+     - Behavior:
+       - Support intentional latency injection (e.g., variable sleep times) to simulate processing latency.
+       - Support error injection (transient and permanent errors) for testing retries, dead-letter queues, and error classification.
+       - Return a structured result dict containing:
+         - task_id
+         - idempotency_key
+         - status (success, failed, duplicate, rejected, dead-lettered, etc.)
+         - error_class (transient, permanent, none)
+         - latency information
+         - any output_key or transformed data identifier.
+
+  3) Metrics
+     - Thread-safe metrics tracking suitable for concurrent access.
+     - Maintain counters and measurements including at least:
+       - enqueue_count
+       - dequeue_count
+       - success_count
+       - failure_count
+       - retry_count
+       - duplicate_count
+       - rejection_count (for queue overflow or fail-fast behavior)
+       - dead_letter_count
+       - queue_depth (current queue size, periodically sampled or updated on enqueue/dequeue)
+       - latency samples enabling computation of mean and P95 latency
+       - throughput (tasks per second) over the measured interval
+       - classification counts for transient vs permanent errors
+     - Provide methods:
+       - record_enqueue()
+       - record_dequeue()
+       - record_success(latency: float)
+       - record_failure(latency: float, error_class: str)
+       - record_retry()
+       - record_duplicate()
+       - record_rejection()
+       - record_dead_letter()
+       - get_mean_latency() -> float
+       - get_p95_latency() -> float
+       - get_throughput() -> float
+       - snapshot() -> dict (returns a JSON-serializable summary of all metrics at the time of call).
+     - Implement export_json() to:
+       - Acquire any necessary lock once.
+       - Build a JSON-serializable dict from the current in-memory metrics state without calling other methods that reacquire that same lock.
+       - Use json.dumps() or writing to a file to produce the JSON representation.
+       - Complete quickly (no blocking on queue.join(), long waits on threads, or while True loops).
+       - Avoid deadlocks by never trying to reacquire the same non-reentrant lock from inside export_json().
+
+  4) IdempotencyStore
+     - Provide idempotency and deduplication functionality keyed on idempotency_key = image_key + "#" + variant/size.
+     - Requirements:
+       - Use SQLite (sqlite3) for persistent storage.
+       - Support both in-memory (":memory:") and file-based databases.
+       - Schema: A table that at minimum stores idempotency_key and status/timestamp information.
+       - Ensure uniqueness via a UNIQUE constraint or PRIMARY KEY on idempotency_key.
+     - Operations:
+       - is_duplicate(idempotency_key: str) -> bool.
+       - mark_processed(idempotency_key: str) -> None.
+       - processed_count() -> int.
+       - load_persistent_state() / persist_state() as needed for tests (for file-based DB paths).
+     - Atomicity requirement:
+       - Provide an atomic method, e.g. try_mark_processed(idempotency_key: str) -> bool, which:
+         - Performs a check-and-insert or insert-or-ignore within a single transaction.
+         - Returns True if this is the first time the key is processed; False if it is a duplicate.
+       - Implement this using SQLite transactions so that concurrent workers cannot race and both treat the same key as new.
+     - Connection management rules:
+       - For in-memory databases (db_path == ":memory:"), maintain a persistent connection that stays open for the lifetime of the store and is shared across operations (with check_same_thread=False as appropriate).
+       - For file-based databases, open connections for each operation or a short-lived context, ensuring that files are not left locked and that tests involving persistence between instances can pass.
+       - Provide a close() method to close and clean up any persistent connection.
+
+  5) WorkerPool
+     - Orchestrate producers, consumers, and the TaskQueue, invoking TaskProcessor, IdempotencyStore, and Metrics.
+     - Responsibilities:
+       - Start worker threads using ThreadPoolExecutor with max_workers.
+       - Enqueue a batch of tasks (from a list or iterator) into the bounded queue.
+       - For each dequeued task:
+         - Compute the idempotency_key from task fields.
+         - Use IdempotencyStore.try_mark_processed(idempotency_key) or equivalent to atomically determine if this is the first processing.
+         - If duplicate:
+           - Record duplicate in Metrics.
+           - Optionally short-circuit processing.
+           - Ensure task_done() is called on the queue.
+         - If new:
+           - Submit processing to the thread pool.
+           - On completion, update Metrics (success/failure, latency, error_class) and IdempotencyStore as appropriate.
+           - Ensure task_done() is called even in error paths.
+       - Manage retries for transient errors with exponential backoff and jitter.
+       - Place permanently failed tasks into a dead-letter queue structure and update Metrics accordingly.
+       - Provide a run() method that:
+         - Enqueues all input tasks.
+         - Starts workers.
+         - Waits for completion of all submitted work, without risking deadlock or an infinite wait.
+         - Ensures each enqueued task eventually leads to a call to queue.task_done().
+         - Ensures graceful worker shutdown via a stop flag / Event or sentinel tasks.
+       - Provide a shutdown/close method that:
+         - Signals workers to exit.
+         - Waits for worker threads to finish (with a reasonable timeout).
+         - Closes IdempotencyStore if applicable.
+
+4. Concurrency and Deadlock Avoidance
+  - No worker or manager thread uses while True without a clear break condition based on a stop flag, sentinel, or empty queue with timeout.
+  - queue.join() is only used if you can guarantee all tasks will call task_done() even in error paths or when duplicates are detected.
+  - Locks are used in small critical sections and are never re-acquired by the same thread in a non-reentrant way.
+  - Metrics.export_json() never blocks indefinitely or causes deadlock.
+  - WorkerPool.run() cannot hang forever:
+    - It should return once all input tasks have either been successfully processed, failed (with dead-letter handling), rejected, or deduplicated.
+    - It should enforce clear shutdown semantics for worker threads.
+
+5. Streaming I/O Simulation
+  - Simulate object storage using a local directory and chunked read/write if needed.
+  - Or use in-memory buffered streaming to avoid loading very large content at once.
+  - Ensure that any I/O used in this project does not introduce long-running blocks that would hang tests.
+
+6. Performance & Benchmarking
+  - Generate or load task sets (via generate_tasks.py and/or sample_tasks_small.json).
+  - Run the baseline implementation (input_new/baseline_task_queue_v2.py) under a certain concurrent load (e.g., 50 or 100 concurrent clients or tasks).
+  - Run the optimized implementation (task_queue_optimized.py) with the same workload.
+  - Measure:
+    - Throughput (tasks per second).
+    - Mean latency.
+    - P95 latency.
+    - Error rate (failures vs total).
+    - Queue depth statistics.
+  - Export results to JSON or CSV (e.g., metrics.json or benchmark_*.json) for comparison.
+  - Throughput: at least ~2x the baseline at 100 concurrent clients, if possible in the given environment.
+  - Latency: P95 latency ≤ 60% of the baseline P95.
+  - Resource usage: avoid prolonged blocking, spinning, or memory thrashing.
+
+7. Testing Strategy (Implementation Side)
+  - Unit tests for:
+    - Idempotency deduplication and persistence (in-memory and file-based SQLite behavior).
+    - Metrics counting correctness for enqueue/dequeue/success/failure/retry/duplicate/rejection/dead-letter.
+    - Mean and P95 latency calculations.
+    - Throughput calculation.
+    - Error classification (transient vs permanent).
+  - Integration tests for:
+    - TaskProcessor behavior with success, error injection, and latency.
+    - BoundedTaskQueue behavior for enqueue/dequeue, size limit, and empty dequeues.
+    - WorkerPool behavior for basic processing, idempotency deduplication, retries on transient errors, queue rejection on overflow, dead-letter behavior, and concurrency.
+    - Concurrency stress tests for metrics thread-safety and concurrent enqueue operations.
+    - Benchmark completion behavior ensuring that benchmark workloads can run to completion.
+
+8. Execution Workflow (For a Human Running the Code)
+  1) Create and activate the virtual environment in the repository root.
+  2) Install dependencies as described in Step 1.
+  3) Run the baseline script:
+     - python input_new/baseline_task_queue_v2.py
+     - Observe and log baseline throughput and P95 latency.
+  4) Run the optimized solution benchmark:
+     - python task_queue_optimized.py --benchmark
+     - Or: python benchmark.py
+     - Print to the terminal: throughput, mean latency, P95 latency, error rate, queue depth stats.
+     - Optionally write metrics and results to JSON files such as metrics.json, metrics_optimized.json, benchmark_100.json.
+  5) Run the tests:
+     - pytest tests/test_task_queue.py -rA -v --tb=short
+     - All tests must complete quickly (no hanging tests) and pass.
+
+9. Output Specification
+  - All tests in tests/test_task_queue.py pass:
+    - IdempotencyStore tests.
+    - Metrics tests, including test_export_json.
+    - TaskProcessor tests.
+    - BoundedTaskQueue tests.
+    - WorkerPool tests, including idempotency deduplication, retries, queue overflow handling, and dead-letter queues.
+    - Concurrency tests.
+    - Benchmark tests.
+  - The optimized implementation uses:
+    - ThreadPoolExecutor with a bounded queue.Queue(maxsize=...).
+    - Real threads and real timing (time.perf_counter()) without any time-freezing utilities.
+    - Proper backpressure and rejection metrics when the queue is full.
+    - SQLite or file-based persistence for idempotency (no pure in-memory-only deduplication unless backed by persistable export used for verification).
+    - JSON export of metrics that is quick, lock-safe, and non-blocking.
+  - The benchmark and/or optimized script prints test and benchmark results to the terminal when invoked with appropriate arguments.
+
+Constraints & Preferences
+  - Use Python 3 standard library as the primary toolset (threading, queue, concurrent.futures, json, logging, sqlite3, time, random, etc.).
+  - Allowed third-party packages: pytest, requests, Pillow, python-dotenv.
+  - Forbidden or strongly discouraged packages and patterns:
+    - Celery, Redis, RabbitMQ, Kafka, or other distributed message queues.
+    - gevent, eventlet, or any monkey-patching concurrency frameworks.
+    - freezegun or any time-freezing/faking utilities.
+    - Heavy multimedia or cloud SDK libraries.
+  - Do not mock the core queue → process → result chain; concurrency must be real.
+  - Only mock external services or failure injection where needed.
+  - No fake concurrency or fake performance measurements.
+  - If any state machine or idempotency logic is present, persist state to SQLite or the file system.
+  - Do not rely solely on in-memory dictionaries for behavior that tests expect to be persistent.
+  - You may modify implementation and configuration files such as task_queue_optimized.py, benchmark.py, requirements.txt, and scripts in the repository root.
+  - You must not modify any files under tests/.
+  - Ensure that all long-running or blocking constructs have clear termination conditions.
+  - Avoid infinite loops, indefinite waits on threading primitives, or blocking I/O in metrics export.
+
+Quality Gates
+  1) Running pytest tests/test_task_queue.py -rA -v --tb=short completes quickly (within a reasonable time) with all tests passing and no hangs.
+  2) The Metrics.export_json() method does not deadlock or hang and returns valid JSON reflecting current metrics.
+  3) The IdempotencyStore supports both in-memory and file-based databases correctly, including persistence behavior validated by the tests.
+  4) WorkerPool.run() and shutdown behavior are free from deadlocks, ensure every enqueued task leads to task_done(), and allow all WorkerPool integration tests to complete successfully.
+  5) The optimized task queue achieves bounded-queue semantics, backpressure, and observable metrics suitable for benchmarking and comparison against the baseline.
+  6) All concurrency behavior relies on real threads, real timing via time.perf_counter(), and real queue operations (no faked concurrency paths).
+
+Final Critical Instruction
+At every step of your reasoning and implementation, prioritize:
+- Avoiding deadlocks and infinite waits.
+- Maintaining thread safety and atomic idempotency operations.
+- Preserving and exposing accurate metrics through a fast, non-blocking JSON export.
+- Ensuring that all existing tests in tests/test_task_queue.py pass without any modification to the tests themselves.

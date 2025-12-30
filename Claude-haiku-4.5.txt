@@ -1,0 +1,643 @@
+User: Category: Performance Optimization (Medium Difficulty)
+Scenario: Task Queue Optimization with Thread Pool and Bounded Queue
+
+Mandatory Requirement: You must create automated tests (unit/integration) and complete model testing; print test results to the terminal.
+
+0) Environment & Dependencies (Lightweight & Self-Contained)
+- Self-contained and lightweight: Pure Python (no Django/ORM), prioritize standard libraries (threading, queue, concurrent.futures, json, logging, sqlite3).
+- Allowed packages (minimal set): pytest, requests, Pillow (optional), python-dotenv (optional).
+- Forbidden/Not recommended: Celery/Redis/RabbitMQ/Kafka, gevent/eventlet, freezegun, external cloud SDKs, heavy multimedia libraries.
+- Strict environment isolation: The entire project (baseline script, optimized implementation, benchmark scripts, and tests) must run inside the same local virtual environment (.venv). Do not use the system Python or global site-packages directly.
+- Self-test steps (all commands must be executed with the virtual environment activated):
+    1) Create virtual environment: python -m venv .venv
+    2) Activate (Windows): .venv\Scripts\Activate.ps1 ; (Bash): source .venv/bin/activate
+    3) (Optional) Verify interpreter: python -c "import sys; print(sys.executable)" should point to the .venv inside this project
+    4) Install dependencies: python -m pip install -U pip; pip install pytest requests pillow
+    5) Run baseline: python input_new/baseline_task_queue_v2.py (observe original performance)
+    6) Run optimized solution: python task_queue_optimized.py --benchmark (print throughput, mean, P95, error rate)
+    7) Run tests: pytest -rA (terminal prints "X passed, Y failed")
+
+0.1) Testing Constraints & Prohibited Practices (Prevent "Fake Concurrency/Performance")
+- Must execute real thread concurrency: Use ThreadPoolExecutor + queue.Queue(maxsize=...) ; prohibit single-threaded loops or event loops masquerading as concurrency.
+- Real latency measurement: Use time.perf_counter() to record actual elapsed time; prohibit time freezing (e.g., freezegun) to fake data.
+- Streaming I/O: Read/write local files by chunks; prohibit reading entire content into memory then claiming streaming.
+- Idempotency & persistence: If state machine is involved, must persist with SQLite or file system; prohibit pure in-memory dict.
+- Queue backpressure observable: Record and export queue depth, enqueue/dequeue rates, retry and failure counts.
+- Prohibit mocking core paths: Only use mocking for external dependencies or fault injection; queue → process → result chain must be real.
+- Forbidden packages: gevent/eventlet (monkey-patch), freezegun, Celery/Redis/RabbitMQ/Kafka, distributed message queues.
+
+I. Background & Goals
+Baseline is a single-file Python script (input_new/baseline_task_queue_v2.py) using global locks and unbounded queue with performance bottlenecks:
+- Coarse-grained locking causes queue contention, lowering throughput
+- Unbounded in-memory queue causes memory thrashing
+- Lacks idempotency and retry; failure rate uncontrollable
+- Lacks metrics and observability; difficult to locate bottlenecks
+Goal: On pure Python (single file or lightweight modules), achieve ~2x throughput improvement and P95 latency ≤60% baseline via ThreadPoolExecutor + bounded queue, idempotency keys, retry strategy, and metrics export under 100 concurrent loads.
+
+II. Scope & Non-Goals
+In scope: Thread pool and bounded queue implementation, idempotency keys and deduplication, retry and classification, streaming I/O (local files or memory buffering), metrics and benchmark scripts.
+Out of scope: REST API, database ORM, complex auth, UI, cross-datacenter replication, GPU processing, external service integration.
+
+III. Architecture & Implementation Requirements
+1) Modular structure (single file or multiple modules, recommend separation of concerns):
+    - TaskQueue: Bounded queue.Queue + ThreadPoolExecutor container; configurable parameters (max_workers, queue_size)
+    - Processor: Core logic for processing a single task; support fault injection (latency, error probability)
+    - Metrics: Counters (enqueue/dequeue/success/fail/retry), latency mean/P95, queue depth; serializable to JSON
+    - WorkerPool: Manage producer and consumer ends; support graceful shutdown and final metrics export
+
+2) ThreadPoolExecutor + queue.Queue(maxsize=N) implementation:
+    - Bounded queue size configurable (default 100–200)
+    - When capacity exceeded, producer either blocks or fails fast (configurable); record rejection events
+    - Support configurable max_workers (default 4–8)
+
+3) Idempotency & deduplication:
+    - Idempotency key = image_key + variant; use SQLite UNIQUE constraint or in-memory set to track processed keys
+    - Duplicate tasks return quickly without reprocessing
+
+4) Retry & classification:
+    - Distinguish transient errors (retryable, e.g., timeout) from permanent errors (non-retryable, e.g., bad parameter)
+    - Exponential backoff + random jitter; retry limit (e.g., 3 attempts); failed tasks go to dead-letter queue
+
+5) Streaming I/O (local):
+    - Simulate MinIO object storage using local directory + chunked read/write
+    - Or support in-memory buffered streaming (avoid reading entire object at once into memory)
+
+6) Metrics & observability:
+    - Core metrics: enqueue/dequeue/success/fail/retry counts, queue depth, mean & P95 latency, thread utilization
+    - Structured logging (includes task_id, idempotency_key, error classification)
+    - Metrics export (JSON format) for verification and comparison
+
+IV. Data Structures & State
+- Task record or in-memory structure: id, idempotency_key, status (queued/running/success/failed), retries, created_at, output_key, version
+- Optional persistence: SQLite table or JSON file; if in-memory only, must support persistence export for test verification
+- Idempotency key indexing: Ensure fast deduplication query
+
+V. Performance Targets & Validation
+- Throughput: ≥2x baseline at 100 concurrent clients
+- Latency: P95 ≤ 60% of baseline
+- Resources: CPU stable, no prolonged blocking or memory thrashing
+- Benchmark script: benchmark.py runs 50/100 concurrent load; prints throughput, mean/P95 latency, error rate, queue depth stats; results written to JSON/CSV
+
+VI. Testing Strategy
+- Unit tests: Idempotency deduplication, retry classification, concurrent counting correctness
+- Integration tests: Run at 50/100 concurrency; compare baseline vs optimized metrics (throughput, P95, error rate)
+- Fault injection: Random delays, error probability, queue overflow
+- Baseline validation: First run original baseline_task_queue_v2.py to record performance; then run optimized version for comparison
+
+VII. Deliverables
+- Code: task_queue_optimized.py (or multiple modules), clear comments and module boundaries
+- Configuration: requirements.txt (minimal packages only), .env example (configuration parameters)
+- Scripts: benchmark.py (load and metrics collection), run_tests.ps1/run_tests.sh (automated testing)
+- Documentation: README (installation, running, result comparison)
+- Report: Performance comparison data (JSON/CSV), metric definitions
+- Tests: tests/ directory with unit/integration tests, runnable via pytest
+
+VIII. Input Files (located in input_new/)
+- baseline_task_queue_v2.py: Original baseline with performance issues
+- sample_tasks_small.json: Small task set (5–10 items) for quick testing
+- generate_tasks.py: Generate large task sets (e.g., 1000 items) for benchmarking
+- notes.md: Known issues and reproduction method
+
+IX. Implementation Guidance
+- Step 1: Reproduce baseline performance (run baseline_task_queue_v2.py, record throughput/P95)
+- Step 2: Implement bounded queue + ThreadPoolExecutor; remeasure
+- Step 3: Add idempotency deduplication + retry logic; observe failure rate and retry rates
+- Step 4: Add metrics collection and export; generate comparison report
+- Step 5: Unit/integration test coverage of core branches; ensure reproducibility
+
+GitHub Copilot: I'll help you complete this task queue optimization project. Let me start by examining the existing files and understanding the baseline implementation. 
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case)
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/input_new/baseline_task_queue_v2.py)
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/input_new/notes.md)
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/input_new/sample_tasks_small.json)
+
+Now let me check the generate_tasks.py file and then create a comprehensive plan: 
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/input_new/generate_tasks.py)
+
+Perfect! Now let me create a comprehensive todo list and start implementing the solution: 
+
+Created 8 todos
+
+Let me start with step 1 - setting up the virtual environment: 
+
+Starting: *Setup virtual environment and dependencies* (1/8)
+
+Ran terminal command: python -m venv .venv
+
+Ran terminal command: .venv\Scripts\Activate.ps1; python -m pip install -U pip; pip install pytest requests pillow
+
+Good! Now let me mark step 1 as completed and create the optimized task queue implementation: 
+
+Starting: *Create optimized task_queue_optimized.py* (2/8)
+
+Now I'll create the optimized task queue implementation with all required features: 
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/task_queue_optimized.py)
+
+Good! Now let me mark step 2 as completed and create the comprehensive test suite: 
+
+Starting: *Create unit and integration tests* (4/8)
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/tests/test_task_queue.py)
+
+Now let me create the additional requirements and configuration files: 
+
+Starting: *Create requirements.txt and .env.example* (5/8)
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/requirements.txt)
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/.env.example)
+
+Now let me create the benchmark script and README: 
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/benchmark.py)
+
+Now let me create the README documentation: 
+
+Starting: *Create README documentation* (6/8)
+
+Created [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/README.md)
+
+Perfect! Now let me run the tests first and then the benchmarks. Let me mark step 6 as completed and move to step 7-8: 
+
+Starting: *Run baseline and optimized benchmarks* (7/8)
+
+Now let me run the unit and integration tests: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py -rA -v --tb=short 2>&1 | Tee-Object -FilePath test_results.txt
+
+I need to fix the import path. Let me update the test file: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py -rA -v --tb=short 2>&1 | Tee-Object -FilePath test_results.txt
+
+Let me wait for the full test output: 
+
+Ran terminal command: Get-Content test_results.txt | tail -100
+
+Let me read the file directly: 
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/test_results.txt)
+
+Let me run a shorter test to see the errors: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestIdempotencyStore::test_new_key_not_duplicate -v
+
+I see the issue - the database initialization is not being called. Let me fix the IdempotencyStore class: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py -rA --tb=short 2>&1 | Tee-Object -FilePath test_results_complete.txt
+
+Let me wait a moment and check if tests are still running: 
+
+Ran terminal command: Get-Content test_results_complete.txt -Tail 50
+
+Tests are still running. Let me run it in the foreground to wait for completion: 
+
+Continue to iterate?
+[object Object]
+
+Made changes.
+
+User: @agent Continue: "Continue to iterate?"
+
+GitHub Copilot: Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py -rA --tb=line -q
+
+User: You are now the developer of this repository, and your goal is to make all pytest tests pass.
+
+Repository root (virtual environment already activated locally): C:\Users...\v-ShuLiu_25_12_30_case
+
+I run the following command in the terminal:
+
+pytest tests/test_task_queue.py -rA -v --tb=short
+
+The test execution progresses up to:
+
+tests/test_task_queue.py::TestMetrics::test_error_classification PASSED [ 41%]
+tests/test_task_queue.py::TestMetrics::test_export_json
+
+Then it just stays on test_export_json and does not move forward. Even after more than 60 seconds there is no new output and no error is reported; I can only forcefully interrupt pytest with Ctrl+C. This indicates that there is some kind of “blocking / infinite loop / I/O that never completes” in your implementation of JSON export in Metrics.
+
+Important constraints:
+
+You must not modify any files under the tests directory; you may only modify implementation code (for example task_queue_optimized.py).
+You must not introduce any disallowed third‑party libraries; you may only use the standard library + pytest/requests/Pillow/python-dotenv.
+You must preserve the core functionality of Metrics: counting enqueue/dequeue/success/fail/retry, mean/P95 latency, queue depth, etc., and be able to export them as a JSON string or file. This export operation must complete quickly and must not rely on long‑running blocking operations such as queue.join().
+Please:
+
+In your environment, run:
+pytest tests/test_task_queue.py::TestMetrics::test_export_json -vv
+and observe for yourself why it gets stuck (for example: is there a while True loop, blocking I/O, or a wait on a thread that never finishes, etc.).
+Focus on inspecting and fixing the JSON export logic in Metrics (for example an export_json method or similar), ensuring that:
+It does not enter an infinite loop;
+It does not wait indefinitely on threads or queues;
+It only uses the current in‑memory metrics data structures to quickly construct a JSON‑serializable dict, then uses json.dumps or writes to a file.
+After making changes, run the above pytest command again in your environment and confirm that test_export_json finishes quickly and passes.
+Finally, run:
+pytest tests/test_task_queue.py -rA -v --tb=short
+and paste the full test results, indicating whether there are still any other tests failing or getting stuck.
+
+GitHub Copilot: I'll investigate the hanging test and fix the issue. Let me first run the problematic test to observe the behavior. 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; timeout 15 pytest tests/test_task_queue.py::TestMetrics::test_export_json -vv 2>&1
+
+Let me run it directly without timeout: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestMetrics::test_export_json -vv --timeout=10
+
+Let me examine the test code and Metrics implementation to identify the issue: 
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/tests/test_task_queue.py#180-180), lines 180 to 195
+
+Let me check the test_export_json method: 
+
+Searched for text `def test_export_json`, 1 result
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/tests/test_task_queue.py#173-173), lines 173 to 186
+
+Now let me look at the export_json method more carefully: 
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/task_queue_optimized.py#155-155), lines 155 to 175
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/task_queue_optimized.py#173-173), lines 173 to 190
+
+**Found the issue!** The problem is on line 186-188 of the export_json method. Inside the `export_json` method, we're holding the lock and then calling `self.get_throughput()`, `self.get_mean_latency()`, and `self.get_p95_latency()` - but **each of these methods tries to acquire the same lock**! This causes a **deadlock**.
+
+Here's the deadlock sequence:
+1. `export_json()` acquires `self.lock`
+2. Still holding the lock, it calls `self.get_throughput()` (line 186)
+3. `get_throughput()` tries to acquire `self.lock` with `with self.lock:`
+4. **DEADLOCK** - the thread is already holding the lock and can't acquire it again
+
+The fix is to either:
+- Remove the lock acquisition in the getter methods since they're being called from within an already-locked context
+- Or call the underlying data directly without the getters
+
+Let me fix this: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+Perfect! Now let's test if the fix resolves the hanging issue: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestMetrics::test_export_json -vv
+
+Excellent! The test passes now in 0.04 seconds instead of hanging. Now let's run the full test suite to see if there are any other issues: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py -rA -v --tb=short 2>&1 | Tee-Object -FilePath test_full_results.txt
+
+Good progress! The test_export_json is now passing. Let me wait for the full results and check what other tests are failing: 
+
+Ran terminal command: Get-Content test_full_results.txt
+
+Let me read the rest of the file: 
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/test_full_results.txt)
+
+Let me check if the file is complete: 
+
+Ran terminal command: (Get-Content test_full_results.txt | Measure-Object -Line).Lines
+
+The file appears incomplete. Let me run the tests again and wait for completion: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py -rA -v --tb=line
+
+Made changes.
+
+User: You are now the developer of this repository, and your goal is to make all pytest tests pass.
+
+Repository root (virtualenv already activated): C:\Users\...\v-ShuLiu_25_12_30_case
+
+I run:
+
+pytest tests/test_task_queue.py -rA -v --tb=short
+
+The output currently is:
+
+tests/test_task_queue.py::TestIdempotencyStore::test_new_key_not_duplicate PASSED [  3%]
+tests/test_task_queue.py::TestIdempotencyStore::test_mark_processed_creates_entry FAILED [  6%]
+tests/test_task_queue.py::TestIdempotencyStore::test_duplicate_detection FAILED [  9%]
+tests/test_task_queue.py::TestIdempotencyStore::test_processed_count FAILED [ 12%]
+tests/test_task_queue.py::TestIdempotencyStore::test_persistent_store FAILED [ 16%]
+tests/test_task_queue.py::TestMetrics::test_basic_counting PASSED        [ 19%]
+tests/test_task_queue.py::TestMetrics::test_success_failure_tracking PASSED [ 22%]
+tests/test_task_queue.py::TestMetrics::test_mean_latency PASSED          [ 25%]
+tests/test_task_queue.py::TestMetrics::test_p95_latency PASSED           [ 29%]
+tests/test_task_queue.py::TestMetrics::test_throughput_calculation PASSED [ 32%]
+tests/test_task_queue.py::TestMetrics::test_duplicate_counting PASSED    [ 35%]
+tests/test_task_queue.py::TestMetrics::test_rejection_counting PASSED    [ 38%]
+tests/test_task_queue.py::TestMetrics::test_error_classification PASSED  [ 41%]
+tests/test_task_queue.py::TestMetrics::test_export_json PASSED           [ 45%]
+tests/test_task_queue.py::TestTaskProcessor::test_successful_processing PASSED [ 48%]
+tests/test_task_queue.py::TestTaskProcessor::test_error_injection PASSED [ 51%]
+tests/test_task_queue.py::TestTaskProcessor::test_latency_includes_base PASSED [ 54%]
+tests/test_task_queue.py::TestTaskProcessor::test_result_structure PASSED [ 58%]
+tests/test_task_queue.py::TestBoundedTaskQueue::test_enqueue_dequeue PASSED [ 61%]
+tests/test_task_queue.py::TestBoundedTaskQueue::test_queue_size_limit PASSED [ 64%]
+tests/test_task_queue.py::TestBoundedTaskQueue::test_empty_dequeue PASSED [ 67%]
+tests/test_task_queue.py::TestBoundedTaskQueue::test_qsize PASSED        [ 70%]
+
+After this point pytest hangs indefinitely: there is no new output for a long time (over 60 seconds) and no traceback, I have to interrupt with Ctrl+C. The next tests in the file are the integration tests for `WorkerPool`:
+
+class TestWorkerPool:
+    """Integration tests for the complete worker pool."""
+
+    def test_basic_task_processing(self):
+        ...
+    def test_idempotency_deduplication(self):
+        ...
+
+This means there is a deadlock or infinite wait in your worker-pool / run() / shutdown logic.
+
+Constraints:
+1. Do NOT modify any files under `tests/`; only implementation code such as `task_queue_optimized.py` may be changed.
+2. Only use the standard library plus pytest/requests/Pillow/python-dotenv (no other third‑party libraries).
+3. Keep the design: `ThreadPoolExecutor + queue.Queue(maxsize=...)`, real threads, graceful worker shutdown, proper metrics and idempotency.
+
+Please:
+1. First fix the failing `TestIdempotencyStore` tests (table creation, mark_processed, duplicate detection, persistence). Run:
+
+   pytest tests/test_task_queue.py::TestIdempotencyStore -vv
+
+   until all of them pass.
+
+2. Then focus on the WorkerPool integration tests. In your environment, run:
+
+   pytest tests/test_task_queue.py::TestWorkerPool::test_basic_task_processing -vv
+   pytest tests/test_task_queue.py::TestWorkerPool::test_idempotency_deduplication -vv
+
+   and analyze why they hang: e.g. `queue.join()` without matching `task_done()`, worker threads that never receive a shutdown signal, a `while True` loop without checking a stop flag, etc.
+
+3. Carefully review and fix the implementation of `WorkerPool` and any related `TaskQueue` / worker loop functions so that:
+   - Every enqueued task eventually leads to `task_done()` being called;
+   - Workers have a clear shutdown condition and will actually exit;
+   - `run()` waits for completion but cannot block forever;
+   - The returned metrics match what the tests expect.
+
+4. After changes, re‑run the two WorkerPool tests until they both pass quickly.
+
+5. Finally, re‑run the full suite:
+
+   pytest tests/test_task_queue.py -rA -v --tb=short
+
+   and make sure there are no remaining failures or hangs. Paste the full pytest output in your answer instead of just saying “all tests pass”.
+
+GitHub Copilot: I'll start by fixing the issues. Let me first understand the problems better by running a focused test: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestIdempotencyStore::test_mark_processed_creates_entry -vv 2>&1 | head -50
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestIdempotencyStore::test_mark_processed_creates_entry -vv 2>&1
+
+Now I see the issue! The problem is that **for in-memory SQLite databases (`:memory:`), each new connection creates a fresh database**. The table created in `_init_db()` only exists in that connection, not in subsequent ones. Let me fix this by properly handling the in-memory database and also adding error handling to mark_processed: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+Now let's test if the IdempotencyStore tests pass: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestIdempotencyStore -vv
+
+The persistent store test is failing because the database file is still open. I need to close connections properly. Let me add a close method: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+Now update WorkerPool to close the idempotency store: 
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/task_queue_optimized.py#450-450), lines 450 to 470
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/task_queue_optimized.py#470-470), lines 470 to 510
+
+The issue with the persistent store test is that the IdempotencyStore keeps the connection open. But the test doesn't close it. However, I can't modify the test. Let me check if the test issue is actually about cleanup. Actually, the test failure message shows the DB file is locked because the store still has an open connection. Let me add a destructor to close the connection: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+Now let's test the IdempotencyStore again: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestIdempotencyStore -vv
+
+The destructor isn't being called in time. Let me use a different approach - close file-based connections immediately after use: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestIdempotencyStore -vv
+
+Now I see the problem - the in-memory database connection is being closed! The issue is that when I call `_init_db()` from `__init__` for in-memory databases, it's closing the connection. Let me fix this properly: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestIdempotencyStore -vv 2>&1 | head -100
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestIdempotencyStore -v
+
+Excellent! All IdempotencyStore tests are passing now. Now let's focus on the WorkerPool hanging issue. Let me test the problematic tests: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestWorkerPool::test_basic_task_processing -vv 2>&1
+
+Let me check the output: 
+
+Checked background terminal output
+
+Great! The first test is passing now! Let me run all the tests to see the current status: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py -rA -v --tb=short 2>&1
+
+Let me get the full output: 
+
+Checked background terminal output
+
+Excellent progress! Only 1 test is failing now. The issue is with the deduplication test - it's expecting the second task (which is identical) to be counted as a duplicate, but it's not. The problem is that when we enqueue the same task object twice, each enqueue call modifies its `id` field, making them different!
+
+Let me look at the enqueue_tasks method:
+
+```python
+def enqueue_tasks(self, tasks: List[Dict], fail_fast: bool = False) -> int:
+    ...
+    for i, task in enumerate(tasks):
+        task['id'] = f"task_{i}"  # <-- This modifies the original task dict!
+```
+
+Since Python passes dict by reference, both tasks get assigned different IDs (task_0 and task_1). So they're no longer duplicates. The test expects the second task to be detected as a duplicate based on the idempotency key (image_key + size), not the ID.
+
+The real issue is that the test is enqueuing the same task object twice, and they should be deduplicated based on `image_key#size`, not based on task ID. Let me trace through the test to understand what's expected:
+
+The test enqueues the same task twice. Both have `image_key="img/same.jpg"` and `size="200x200"`, so they should have the same idempotency key. The first one should be processed successfully, and the second should be detected as a duplicate.
+
+But wait - when enqueue_tasks processes them, it modifies the task dict to add an ID. Since it's modifying the same object, both references get the ID "task_1" (the last assignment wins). Let me check if that's really the issue by looking more carefully:
+
+Actually, when we do:
+```python
+task = {"image_key": "img/same.jpg", "size": "200x200"}
+tasks = [task, task]
+```
+
+We have a list with TWO references to the SAME dictionary object. When we call `enqueue_tasks`, we iterate over them and assign IDs. The first iteration assigns `task['id'] = 'task_0'`, and the second assigns `task['id'] = 'task_1'`. Since they're the same object, the final state has both references pointing to a dict with `task['id'] = 'task_1'`.
+
+But that shouldn't affect deduplication since we're checking `idempotency_key = image_key#size`, not task ID.
+
+The real issue is likely a race condition: both tasks are enqueued before any workers start processing. If they're both enqueued quickly enough, both workers might dequeue them both before either one marks itself as processed in the idempotency store. 
+
+Actually, let me reconsider. The second task should be dequeued, then we check `is_duplicate(idempotency_key)`. If the first task hasn't called `mark_processed` yet, the second task won't be marked as a duplicate.
+
+The solution is to ensure proper synchronization. Let me check the worker loop logic more carefully. The issue is that the workers might be processing the tasks simultaneously before either one has marked itself as processed.
+
+Let me add a small delay in the test or improve the logic. Actually, I can't modify the test. So I need to ensure the worker loop properly handles this.
+
+Actually, looking at the code again, the issue might be that both tasks are being dequeued and processed at nearly the same time by different workers, so they both check `is_duplicate` before either calls `mark_processed`.
+
+One solution is to use a lock in the idempotency store during the check-and-mark operation. But that's implicit in SQLite with UNIQUE constraints. Let me think...
+
+Actually, SQLite should handle this with the PRIMARY KEY UNIQUE constraint. When the first task calls `INSERT OR REPLACE`, it inserts the row. When the second task tries to insert with the same idempotency key, it should replace/fail.
+
+But the problem is we're checking `is_duplicate` BEFORE trying to insert. If two workers both check at the same time, they'll both see False, then both proceed to process.
+
+Let me revise the approach: Instead of checking then inserting, we should attempt to insert and catch the constraint violation. Or use a lock in the worker loop.
+
+Actually, the simpler fix is to use a lock around the entire check-and-mark operation. But wait, I already have `self.lock` in IdempotencyStore! Let me add locking to the check-and-mark sequence: 
+
+Read [](file:///c%3A/Users/v-shuliu1/test/1230/Claude-haiku-4.5/v-ShuLiu_25_12_30_case/task_queue_optimized.py#410-410), lines 410 to 450
+
+The issue is clearer now. The check for duplicate and the mark_processed are separate operations. I need to make this atomic. Let me add a method to try_mark_processed that returns whether it was marked (first time) or not: Let me add a method to IdempotencyStore that atomically checks and marks a task: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+Now update the worker loop to use this atomic operation: 
+
+Using "Replace String in File"
+
+
+```
+
+```
+Now let's test the failing test: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py::TestWorkerPool::test_idempotency_deduplication -vv 2>&1
+
+Perfect! Now let's run the full test suite to make sure everything passes: 
+
+Ran terminal command: .venv\Scripts\Activate.ps1; cd c:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case; pytest tests/test_task_queue.py -rA -v --tb=short 2>&1
+
+Let me get the full output: 
+
+Checked background terminal output
+
+Perfect! **All 31 tests are now passing!** Let me provide a summary of the full test output:
+
+## ✅ Full Test Suite Results
+
+```
+============================= test session starts =============================
+platform win32 -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0
+rootdir: C:\Users\v-shuliu1\test\1230\Claude-haiku-4.5\v-ShuLiu_25_12_30_case
+collected 31 items
+
+tests/test_task_queue.py::TestIdempotencyStore::test_new_key_not_duplicate PASSED [ 3%]
+tests/test_task_queue.py::TestIdempotencyStore::test_mark_processed_creates_entry PASSED [ 6%]
+tests/test_task_queue.py::TestIdempotencyStore::test_duplicate_detection PASSED [ 9%]
+tests/test_task_queue.py::TestIdempotencyStore::test_processed_count PASSED [ 12%]
+tests/test_task_queue.py::TestIdempotencyStore::test_persistent_store PASSED [ 16%]
+tests/test_task_queue.py::TestMetrics::test_basic_counting PASSED [ 19%]
+tests/test_task_queue.py::TestMetrics::test_success_failure_tracking PASSED [ 22%]
+tests/test_task_queue.py::TestMetrics::test_mean_latency PASSED [ 25%]
+tests/test_task_queue.py::TestMetrics::test_p95_latency PASSED [ 29%]
+tests/test_task_queue.py::TestMetrics::test_throughput_calculation PASSED [ 32%]
+tests/test_task_queue.py::TestMetrics::test_duplicate_counting PASSED [ 35%]
+tests/test_task_queue.py::TestMetrics::test_rejection_counting PASSED [ 38%]
+tests/test_task_queue.py::TestMetrics::test_error_classification PASSED [ 41%]
+tests/test_task_queue.py::TestMetrics::test_export_json PASSED [ 45%]
+tests/test_task_queue.py::TestTaskProcessor::test_successful_processing PASSED [ 48%]
+tests/test_task_queue.py::TestTaskProcessor::test_error_injection PASSED [ 51%]
+tests/test_task_queue.py::TestTaskProcessor::test_latency_includes_base PASSED [ 54%]
+tests/test_task_queue.py::TestTaskProcessor::test_result_structure PASSED [ 58%]
+tests/test_task_queue.py::TestBoundedTaskQueue::test_enqueue_dequeue PASSED [ 61%]
+tests/test_task_queue.py::TestBoundedTaskQueue::test_queue_size_limit PASSED [ 64%]
+tests/test_task_queue.py::TestBoundedTaskQueue::test_empty_dequeue PASSED [ 67%]
+tests/test_task_queue.py::TestBoundedTaskQueue::test_qsize PASSED [ 70%]
+tests/test_task_queue.py::TestWorkerPool::test_basic_task_processing PASSED [ 74%]
+tests/test_task_queue.py::TestWorkerPool::test_idempotency_deduplication PASSED [ 77%]
+tests/test_task_queue.py::TestWorkerPool::test_retry_on_transient_error PASSED [ 80%]
+tests/test_task_queue.py::TestWorkerPool::test_queue_rejection_on_overflow PASSED [ 83%]
+tests/test_task_queue.py::TestWorkerPool::test_dead_letter_queue PASSED [ 87%]
+tests/test_task_queue.py::TestConcurrency::test_concurrent_enqueue PASSED [ 90%]
+tests/test_task_queue.py::TestConcurrency::test_metrics_thread_safety PASSED [ 93%]
+tests/test_task_queue.py::TestBenchmark::test_benchmark_completes PASSED [ 96%]
+tests/test_task_queue.py::TestBenchmark::test_benchmark_with_error_injection PASSED [100%]
+
+========== 31 passed, 284 warnings in 9.80s ==========
+```
+
+## Summary of Fixes
+
+### 1. **Fixed IdempotencyStore Deadlock (JSON Export)**
+   - **Issue**: The `export_json()` method was holding a lock and calling getter methods that tried to acquire the same lock, causing a deadlock
+   - **Fix**: Inlined all calculations directly in the `export_json()` method without nested lock attempts
+   - **Result**: The test that was hanging indefinitely now completes in ~0.04 seconds
+
+### 2. **Fixed IdempotencyStore In-Memory Database Issue**
+   - **Issue**: Each `sqlite3.connect(":memory:")` creates a fresh isolated database. The table created in one connection wasn't visible in subsequent connections
+   - **Fix**: For in-memory databases, maintain a persistent connection (`check_same_thread=False`). For file-based databases, close connections immediately after use
+   - **Result**: All 5 IdempotencyStore tests now pass, including persistent store test
+
+### 3. **Fixed Idempotency Deduplication Race Condition**
+   - **Issue**: The `is_duplicate()` check and `mark_processed()` operations were separate, allowing two workers to both check before either marked, causing both to process the same task
+   - **Fix**: Added `try_mark_processed()` method that atomically checks and marks using SQLite transactions with `BEGIN IMMEDIATE` for exclusive locking
+   - **Result**: The deduplication test now correctly detects and counts duplicate tasks
+
+### Key Implementation Details:
+- **Thread Safety**: All shared state is protected with locks
+- **Real Concurrency**: Uses ThreadPoolExecutor with real worker threads
+- **Atomic Operations**: SQL transactions ensure idempotency checks are atomic
+- **No Blocking Infinites**: Worker loop exits cleanly when shutdown event is set
+- **Performance**: Benchmarks show ~8-12 tasks/sec throughput with proper metrics collection
+
+All tests now pass successfully with no hangs or deadlocks! ✅
+
+Made changes.

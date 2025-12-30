@@ -1,0 +1,53 @@
+{
+  "baseline": {
+    "duration": 0.1528615951538086,
+    "total_time_measured": 0.2221937000285834,
+    "exit_code": 0
+  },
+  "optimized": {
+    "duration": 1.014746200060472,
+    "total_time_measured": 1.1764581999741495,
+    "metrics": {
+      "summary": {
+        "duration_sec": 1.014746200060472,
+        "total_enqueued": 5,
+        "total_dequeued": 5,
+        "success_count": 5,
+        "fail_count": 0,
+        "retry_count": 0,
+        "reject_count": 0,
+        "success_rate": 1.0,
+        "throughput_per_sec": 4.927340451929787
+      },
+      "latency": {
+        "mean_ms": 2.1808800287544727,
+        "p95_ms": 3.016300033777952,
+        "min_ms": 1.908999984152615,
+        "max_ms": 3.016300033777952
+      },
+      "error_breakdown": {},
+      "config": {
+        "max_workers": 4,
+        "queue_size": 100,
+        "processor_config": {}
+      }
+    },
+    "exit_code": 0
+  },
+  "comparison": {
+    "baseline_duration_sec": 0.1528615951538086,
+    "optimized_duration_sec": 1.014746200060472,
+    "speedup_factor": 0.15064022426957507,
+    "improvement_percent": -563.8333186562911,
+    "target_speedup": 2.0,
+    "target_met": false,
+    "optimized_metrics": {
+      "throughput_per_sec": 4.927340451929787,
+      "success_rate": 1.0,
+      "mean_latency_ms": 2.1808800287544727,
+      "p95_latency_ms": 3.016300033777952,
+      "retry_count": 0,
+      "reject_count": 0
+    }
+  }
+}
